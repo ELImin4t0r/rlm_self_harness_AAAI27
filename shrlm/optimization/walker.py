@@ -137,7 +137,11 @@ def build_call_tree(completion: RLMChatCompletion) -> CallNode:
     inherit the parent's logger, so the entire tree is missing, not just the
     root.
     """
-    if completion.metadata is None and completion.execution_failure is None:
+    if (
+        completion.metadata is None
+        and completion.execution_failure is None
+        and completion.error is None
+    ):
         raise ValueError(
             "Completion has no trajectory metadata. Construct the RLM with "
             "logger=RLMLogger() -- children inherit the parent's logger, so without one "
@@ -151,7 +155,12 @@ def build_call_tree_from_dict(data: dict[str, Any]) -> CallNode:
     metadata = data.get("metadata")
     failure = data.get("execution_failure")
     runtime_error = failure is not None and failure.get("cause") == "runtime_error"
-    if metadata is None and not runtime_error:
+    # A call-level ``error`` (set when the single call itself failed, e.g. a
+    # worker crash before any REPL turn ran -- response is empty) is the same
+    # kind of legitimate no-trajectory signal as ``runtime_error``: the run
+    # genuinely has no recorded trajectory, not a logger misconfiguration.
+    has_error = data.get("error") is not None
+    if metadata is None and not runtime_error and not has_error:
         raise ValueError("Serialized completion has no trajectory metadata")
 
     run_metadata = (metadata or {}).get("run_metadata") or {}
@@ -353,7 +362,7 @@ def compute_tree_stats(root: CallNode, ctx: WalkContext | None = None) -> TreeSt
 def walk(completion: RLMChatCompletion) -> tuple[CallNode, TreeStats]:
     """Reconstruct a tree and compute its statistics in one step."""
     metadata = completion.metadata
-    if metadata is None and completion.execution_failure is None:
+    if metadata is None and completion.execution_failure is None and completion.error is None:
         raise ValueError(
             "Completion has no trajectory metadata. Construct the RLM with logger=RLMLogger()."
         )
