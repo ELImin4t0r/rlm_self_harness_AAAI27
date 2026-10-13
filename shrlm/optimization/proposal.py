@@ -1725,8 +1725,13 @@ def validate_batch_members(
             if duplicate_json_keys(selection):
                 raise ProposalRejection("duplicate JSON keys in selection")
             reason = selection.get("reason")
-            if not isinstance(reason, str) or not reason.strip() or len(reason) > 600:
-                raise ProposalRejection("selection reason must contain 1-600 characters")
+            # Deferred (see below), not raised here: a batch item can overrun both
+            # ``reason`` and a behavior field (``behavioral_change`` etc.)
+            # simultaneously, and reporting only the first one found can burn an
+            # attempt fixing it while the second violation -- never surfaced --
+            # kills the next one. Content checks combine after every structural
+            # /orphan-exclusion guard below has already passed.
+            reason_violation = not isinstance(reason, str) or not reason.strip() or len(reason) > 600
             refs = selection.get("evidence_refs", [])
             if (
                 not isinstance(refs, list)
@@ -1767,6 +1772,20 @@ def validate_batch_members(
                 raise ProposalRejection(
                     "repair must target only an original failed pattern and pair role"
                 )
+            # Collected, not raised one at a time: ``reason`` length and the
+            # behavior-field lengths are independent of each other, so both can
+            # overrun on the same response. validate_candidate_spec() also checks
+            # behavioral_difference_violation internally; pre-checking it here
+            # keeps that call a no-op on this path while letting both violations
+            # surface together.
+            content_violations: list[str] = []
+            if reason_violation:
+                content_violations.append("selection reason must contain 1-600 characters")
+            behavior_violation = behavioral_difference_violation(item, required=True)
+            if behavior_violation:
+                content_violations.append(behavior_violation)
+            if content_violations:
+                raise ProposalRejection("; ".join(content_violations))
             spec = validate_candidate_spec(item, patterns)
             if pair:
                 members = [

@@ -74,6 +74,53 @@ OOLONG_PAIRS_LENGTHS: tuple[str, ...] = (*OOLONG_PAIRS_OPTIMIZATION_LENGTHS, "lo
 # loader(config, length, limit, seed) -> exactly ``limit`` instance dicts.
 LoaderFn = Callable[[ExperimentConfig, str, int, int], list[dict[str, Any]]]
 
+# OOLONG-Pairs' held_in/held_out/test roles are assigned by slicing one
+# seeded draw in order (``materialize_environment``): instances[0:n_in] ->
+# held_in, instances[n_in:n_in+n_ho] -> held_out, the rest -> test. With
+# seed=0 that slicing concentrated the three hardest task_ids in the whole
+# 20-task pool (19, 11, 18 -- individually F1 ~0.22-0.73 across mining and
+# validation rounds 1-2) into held_in, while held_out drew only the easiest
+# (4, 6, 8, 10 -- individually F1 ~0.80-0.94) -- a seed-luck difficulty
+# confound, not a deliberate design: round 2's baseline scored macro F1
+# 0.706 on held-in mining versus 0.857 on held-out validation, the SAME
+# frozen H0 harness, purely from which task_ids landed where. This order
+# interleaves the known difficulty spread across held_in and held_out
+# instead (task_ids with no measurement yet are appended in task_id order,
+# unprioritized). Applied as a stable sort in ``load_oolong_pairs_split``
+# after the loader's own seeded draw, so it is deterministic and
+# seed-independent, not a second source of randomness.
+OOLONG_PAIRS_CURATED_TASK_ORDER: tuple[int, ...] = (
+    # held_in (8 slots, n_in=8): keeps some of the previously held-in hard
+    # task_ids (12, 15, 17, 19) and mixes in easy ones (1, 3, 8) plus one
+    # never-measured task_id (2).
+    1,
+    2,
+    3,
+    8,
+    12,
+    15,
+    17,
+    19,
+    # held_out (8 slots, n_ho=8): keeps the previously held-out easy
+    # task_ids (4, 6, 10) and now also draws hard ones (11, 18) plus three
+    # never-measured task_ids (5, 7, 9) -- held_out is no longer an
+    # easy-only population.
+    4,
+    5,
+    6,
+    7,
+    9,
+    10,
+    11,
+    18,
+    # test (4 slots, test_short=4): never-measured task_ids, untouched by
+    # promotion decisions either way.
+    13,
+    14,
+    16,
+    20,
+)
+
 
 class SplitsPersistenceError(ExperimentError):
     """Persisted splits contradict the configuration or were modified on disk."""
@@ -115,6 +162,15 @@ def load_oolong_pairs_split(
     blended optimization lengths (8192/16384/32768 at the shipped config),
     ``long`` is the separate 262144-token length reserved for final
     evaluation only.
+
+    The loader's own seeded draw returns every requested task_id (when
+    ``limit`` equals the full configured task_id pool, as it does for the
+    blended optimization lengths) in a seed-shuffled order; this reorders
+    that result by ``OOLONG_PAIRS_CURATED_TASK_ORDER`` (a stable sort, ties
+    broken by the loader's own order) before ``materialize_environment``
+    slices it into held_in/held_out/test, so which task_ids land in which
+    role is a deliberate, known-difficulty-mixed choice instead of whatever
+    the seed's shuffle happened to produce.
     """
     env = config.environments.oolong_pairs
     if length not in OOLONG_PAIRS_LENGTHS:
@@ -125,7 +181,12 @@ def load_oolong_pairs_split(
         "mid32k": env.context_length_mid32k,
         "long": env.context_length_long,
     }[length]
-    return load_oolong_pairs_from_config(env, n=limit, seed=seed, context_lengths=(context_length,))
+    instances = load_oolong_pairs_from_config(
+        env, n=limit, seed=seed, context_lengths=(context_length,)
+    )
+    priority = {task_id: index for index, task_id in enumerate(OOLONG_PAIRS_CURATED_TASK_ORDER)}
+    default = len(OOLONG_PAIRS_CURATED_TASK_ORDER)
+    return sorted(instances, key=lambda instance: priority.get(instance["task_id"], default))
 
 
 def load_oolong_synth_split(

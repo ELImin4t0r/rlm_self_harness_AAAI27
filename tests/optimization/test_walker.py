@@ -259,3 +259,38 @@ def test_runtime_failure_without_trajectory_has_minimal_root():
     assert root.usage_summary == completion.usage_summary.to_dict()
     assert completion.metadata is None
     assert build_call_tree_from_dict(completion.to_dict()).to_dict() == root.to_dict()
+
+
+def test_call_level_error_without_execution_failure_has_minimal_root():
+    """Regression test: a call-level ``error`` (set when the single call
+    itself failed, e.g. a run worker killed by a provider timeout before any
+    REPL turn ran -- response is empty, no ``execution_failure`` either)
+    used to raise "Completion has no trajectory metadata" from ``walk()``,
+    ``build_call_tree()``, and ``build_call_tree_from_dict()`` alike, even
+    though this is exactly the same kind of legitimate no-trajectory
+    completion ``execution_failure`` already produces a minimal root for.
+    A frozen live run (``RunWorkerError: APIStatusError: Error code: 408``)
+    hit this and crashed mining's attribution pass.
+    """
+    from rlm.core.types import RLMChatCompletion, UsageSummary
+
+    completion = RLMChatCompletion(
+        "model",
+        "prompt",
+        "",
+        UsageSummary({}),
+        0.0,
+        error="RunWorkerError: APIStatusError: Error code: 408 - Timeout",
+    )
+    assert completion.metadata is None
+    assert completion.execution_failure is None
+
+    root = build_call_tree(completion)
+    assert root.node_id == "r"
+    assert root.iterations == []
+    assert build_call_tree_from_dict(completion.to_dict()).to_dict() == root.to_dict()
+
+    walked_root, stats = walk(completion)
+    assert walked_root.to_dict() == root.to_dict()
+    assert stats.n_nodes == 1
+    assert stats.n_iterations == 0

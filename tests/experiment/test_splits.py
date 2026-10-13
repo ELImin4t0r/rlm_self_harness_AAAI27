@@ -20,8 +20,10 @@ import shrlm.environments.oolong_pairs as oolong_pairs
 from shrlm.experiment.config import ExperimentConfig, load_config
 from shrlm.experiment.splits import (
     MANIFEST_FILE,
+    OOLONG_PAIRS_CURATED_TASK_ORDER,
     SplitsPersistenceError,
     instance_lines,
+    load_oolong_pairs_split,
     materialize_splits,
     sha256_text,
     split_file_name,
@@ -466,3 +468,33 @@ class TestOolongPairsEnvironment:
         assert {name: details["count"] for name, details in files.items()} == expected_counts
         for name, count in expected_counts.items():
             assert len((splits_dir / name).read_text().splitlines()) == count
+
+
+class TestOolongPairsCuratedTaskOrder:
+    """``load_oolong_pairs_split`` reorders the loader's seeded draw by
+    ``OOLONG_PAIRS_CURATED_TASK_ORDER`` so which task_ids land in held_in
+    versus held_out is a deliberate difficulty mix, not whatever the seed's
+    shuffle happened to produce."""
+
+    def test_full_pool_draw_matches_the_curated_order_exactly(self, fetch_calls, config):
+        instances = load_oolong_pairs_split(config, "short", limit=20, seed=0)
+        assert [instance["task_id"] for instance in instances] == list(
+            OOLONG_PAIRS_CURATED_TASK_ORDER
+        )
+
+    def test_order_is_identical_across_different_seeds(self, fetch_calls, config):
+        """The curated order is deliberate and seed-independent -- unlike the
+        raw loader draw, a different seed must not change which task_ids
+        land in which role once every task_id is requested."""
+        first = load_oolong_pairs_split(config, "short", limit=20, seed=0)
+        second = load_oolong_pairs_split(config, "short", limit=20, seed=1)
+        assert [i["task_id"] for i in first] == [i["task_id"] for i in second]
+
+    def test_a_partial_draw_still_respects_relative_priority(self, fetch_calls, config):
+        """With limit < the full pool, the loader's own seeded shuffle decides
+        WHICH task_ids are present, but among whichever are present, the
+        curated order still decides their relative sequence."""
+        instances = load_oolong_pairs_split(config, "short", limit=8, seed=0)
+        present = [instance["task_id"] for instance in instances]
+        priority = {task_id: index for index, task_id in enumerate(OOLONG_PAIRS_CURATED_TASK_ORDER)}
+        assert present == sorted(present, key=lambda task_id: priority[task_id])

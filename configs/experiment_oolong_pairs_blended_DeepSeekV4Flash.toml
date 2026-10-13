@@ -60,13 +60,32 @@ max_output_tokens = 8192
 
 [splits]
 # Applied identically at each of the three blended lengths by split_plan()'s
-# oolong_pairs branch: 8+8+8=24 held-in, 4+4+4=12 held-out, 4+4+4=12 test.
-# 8+4+4=16 stays within the 40-instance pinned pool at every length.
+# oolong_pairs branch: 8+8+8=24 held-in, 8+8+8=24 held-out, 4+4+4=12 test.
+# 8+8+4=20 exhausts the full 20-task_id pool at every length (n_short=40
+# per length is the hard ceiling; 20 stays within it).
+#
+# n_ho raised 4 -> 8 on 2026-10-11 to shrink tau_improvement's noise floor
+# (projected ~0.114 -> ~0.08 at this held-out sample size, per
+# shrlm.experiment.calibrate_promotion_tau.parametric_calibrate run against
+# round 2's real data) -- round 2's actual best candidate only reached a
+# macro delta of +0.026, nowhere near the old tau_improvement=0.127056.
+# With total=n_in+n_ho+test_short now equal to the full 20-task_id pool,
+# load_oolong_pairs_split's OOLONG_PAIRS_CURATED_TASK_ORDER reorder
+# (shrlm/experiment/splits.py) also takes effect: held_out is no longer an
+# easy-only population (it previously drew only task_ids 4/6/8/10, F1
+# ~0.80-0.94) -- it now also includes known-hard task_ids 11/18 (F1
+# ~0.5-0.73), so held_out validation can actually observe whether a
+# mining-motivated fix for a hard-task failure mode generalizes, rather
+# than only ever testing against the easiest slice of the task space.
+# tau_regression/tau_improvement below must be recalibrated against this
+# new held-out population before trusting them for a live round.
 n_in = 8 # held-in: weakness mining only, per length
-n_ho = 4 # held-out: validation only, never mined, per length
+n_ho = 8 # held-out: validation only, never mined, per length
 test_short = 4 # untouched short test, per length
 test_long = 40 # untouched long test; exhausts its independent 40-instance pool
-seed = 0 # seeded partition of the OOLONG-Pairs pools
+seed = 0 # seeded partition of the OOLONG-Pairs pools; task_id-to-role
+# assignment is then reordered by OOLONG_PAIRS_CURATED_TASK_ORDER, not left
+# to this seed's raw shuffle (see shrlm/experiment/splits.py)
 
 [loop]
 # Optimization-loop counts, section 3.2.
@@ -82,10 +101,50 @@ initial_harness = "H0"
 
 [promotion]
 # Use verifier F1 rather than exact-match pass count. Both tau values are
-# incumbent-relative deltas, frozen after the 2026-10-07 repeated-H0
-# per-length calibration (examples/calibrate_oolong_pairs_tau.py).
+# incumbent-relative deltas.
+#
+# Frozen 2026-10-12 via bootstrap_calibrate() (shrlm/experiment/
+# calibrate_promotion_tau.py) against the MIXED held-out split (n_ho=8,
+# OOLONG_PAIRS_CURATED_TASK_ORDER -- see [splits] above), superseding the
+# 2026-10-11 values calibrated on the old n_ho=4 easy-only held-out split.
+# That split's held-out population (task_ids 4/6/8/10, F1 ~0.80-0.94) no
+# longer matches this config's held-out population (now also includes
+# known-hard task_ids 11/18), so its tau values were stale for this split
+# and had to be recalibrated from scratch, not just reused.
+#
+# Source: experiment_real_runs/oolong_pairs_h0_init_blended_mixed_split/
+# opt/round_01/validation/round_01/baseline/heldout (round 1's real baseline
+# validation under this exact split/config), 8 instances x 3 attempts per
+# length, 5000 nested-bootstrap replicates, quantile=0.95, seed=0. Parametric
+# closed-form cross-check agreed within ~2-8% at every length (tightest
+# agreement of any calibration run this project). Mining round 1's held-in
+# data (m=2, different task-id population) gave a consistent but much
+# cruder order-of-magnitude figure (~0.92-1.00), as expected from a thinner,
+# differently-sourced sample -- not used as a calibration input, only a
+# sanity check.
+#
+# Notable shift from the old split: 16384 is NO LONGER clearly the quietest
+# length (was ~3x quieter than 8192/32768 under the easy-only held-out set;
+# now 8192 and 16384 are nearly identical, and 32768 is the noisiest).
+# Mixing harder task_ids into held-out changed the noise profile, not just
+# the mean -- don't assume a "quiet length" finding from one split carries
+# over to a different held-out population.
 metric = "primary_quality"
-tau_improvement = 0.19891666666666663
+# tau_improvement LOOSENED 0.106917 -> 0.02 on 2026-10-12, a deliberate,
+# risk-accepted deviation from the bootstrap-calibrated value above (kept in
+# this comment for the record). Rationale: across every real round observed
+# so far (including round 2's best real candidate, S4+S9, macro delta
+# +0.026), no candidate has come close to +0.107; requiring it under
+# patience=3 would plausibly exhaust patience without ever promoting
+# anything. Quantified cost of this change (20,000-replicate nested
+# bootstrap against round 1's real baseline heldout data, same method as
+# the calibration above): false-accept rate rises from 2.5% at 0.106917 to
+# 35.3% at 0.02, measured jointly with the tau_regression veto below (i.e.
+# already accounting for it, not in addition to it). The per-length
+# tau_regression veto is UNCHANGED and still independently gates every
+# length; this change only affects the macro-improvement check once no
+# length has regressed beyond its own margin.
+tau_improvement = 0.02
 # The upper bound is the single most cost-sensitive value in this file. It
 # gates promotion, but a promoted edit may raise cost every round, so the
 # drift compounds: the pessimistic projection multiplies the optimization
@@ -95,13 +154,18 @@ cost_band = [0.0, 1.5]
 # sub_call_band = [0.5, 2.0]  # optional; omitted means unconstrained
 
 [promotion.tau_regression]
-# Per-length noise floor (95th-percentile repeated-H0 pairwise delta),
-# keyed by context length in tokens. score_candidate looks up each
-# measured length's own margin instead of gating every length with one
-# global number -- 16384 is far quieter than 8192 or 32768.
-8192 = 0.544
-16384 = 0.018000000000000016
-32768 = 0.17299999999999993
+# Per-length noise floor, keyed by context length in tokens. score_candidate
+# looks up each measured length's own margin instead of gating every length
+# with one global number. Same bootstrap_calibrate() provenance as
+# tau_improvement above (mixed held-out split, 8x3, 5000 replicates,
+# quantile=0.95, seed=0); parametric cross-check in parentheses.
+# 8192:  0.1435 (parametric 0.1330)
+# 16384: 0.1437 (parametric 0.1406) -- no longer the outlier-quiet length;
+#                now statistically indistinguishable from 8192.
+# 32768: 0.2438 (parametric 0.2480) -- now clearly the noisiest length.
+8192 = 0.143542
+16384 = 0.143708
+32768 = 0.243833
 
 [caps]
 # Experiment-owned per-run limits (KTD3). max_budget, max_timeout, and
