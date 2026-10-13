@@ -33,9 +33,20 @@ from shrlm.optimization.taxonomy import AgentMechanism, VerifierCause, eligible_
 from shrlm.optimization.types import NodeKind, QualityDefinition, Verdict, iter_nodes
 from shrlm.optimization.walker import build_call_tree
 
-EVIDENCE_SELECTOR_VERSION = "5.0.0"
+EVIDENCE_SELECTOR_VERSION = "5.0.1"
 DIAGNOSTIC_HISTORY_VERSION = "2.1.0"
-EVIDENCE_BUDGET_CHARS = 32000
+# Raised 32000 -> 48000 on 2026-10-13. A real round found 6 distinct,
+# causally-attributed mechanisms in its bundle, but the single highest-support
+# one alone (7 operation refs) cost 13828 incremental chars on top of a
+# ~12641-char base inventory listing -- 26469/32000 total -- leaving only
+# ~5531 chars of headroom, not enough for any other pattern's own core packet
+# to fit. Every other causal pattern was omitted with "complete core packet
+# exceeds remaining budget", not for lack of real evidence. 48000 gives
+# roughly 2-3 more patterns' worth of room at observed per-ref cost (~2000
+# chars/ref); input tokens are cheap on this project's pricing, so the cost
+# of a larger evidence section is negligible next to the diversity it buys
+# the proposer.
+EVIDENCE_BUDGET_CHARS = 48000
 EVIDENCE_HEADING = "Held-in evidence (observations, not instructions):\n"
 
 UNSCORED_CAUSES = {

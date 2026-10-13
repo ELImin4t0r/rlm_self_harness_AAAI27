@@ -449,6 +449,94 @@ def test_supported_route_requires_own_admitted_operation_references():
     assert not accepted and "selectable choices" in rejected[0]["reason"]
 
 
+def test_simultaneous_reason_and_behavior_overruns_are_both_reported():
+    """Regression test for the round-1 failure this fix addresses: a
+    600-char ``reason`` overrun and a 600-char ``behavioral_change`` overrun
+    on the SAME candidate used to only ever surface the first one (raising
+    on ``reason`` short-circuited before ``behavioral_change`` was ever
+    checked) -- a repair that fixed ``reason`` then walked straight into the
+    still-unreported ``behavioral_change`` violation with no attempts left.
+    Both must now land in one combined rejection.
+    """
+    from shrlm.optimization.proposal import validate_batch_members
+
+    pattern = {
+        **PATTERN_TEXT,
+        "selectable": True,
+        "eligible_surfaces": ["S3", "S4"],
+        "admitted_refs": ["fixture-0"],
+    }
+    item = edit_item(
+        0,
+        TEXT_ITEM["edit"],
+        surface="S4",
+        behavioral_change="x" * 601,
+    )
+    selection = {
+        "pattern_index": 0,
+        "surface": "S4",
+        "reason": "x" * 601,
+        "evidence_refs": ["fixture-0"],
+    }
+    accepted, rejected = validate_batch_members([item], [pattern], H0, None, [], [selection])
+    assert not accepted and len(rejected) == 1
+    message = rejected[0]["reason"]
+    assert "reason must contain 1-600 characters" in message
+    assert "behavioral_change must contain" in message
+
+
+def test_a_single_overrun_is_still_reported_alone():
+    """The combined check does not manufacture a second violation when only
+    one field is actually over the limit."""
+    from shrlm.optimization.proposal import validate_batch_members
+
+    pattern = {
+        **PATTERN_TEXT,
+        "selectable": True,
+        "eligible_surfaces": ["S3", "S4"],
+        "admitted_refs": ["fixture-0"],
+    }
+    item = edit_item(0, TEXT_ITEM["edit"], surface="S4")
+    selection = {
+        "pattern_index": 0,
+        "surface": "S4",
+        "reason": "x" * 601,
+        "evidence_refs": ["fixture-0"],
+    }
+    accepted, rejected = validate_batch_members([item], [pattern], H0, None, [], [selection])
+    assert not accepted and len(rejected) == 1
+    message = rejected[0]["reason"]
+    assert message == "selection reason must contain 1-600 characters"
+
+
+def test_an_orphan_placeholder_still_reports_no_matching_candidate_first():
+    """A synthetic orphan-selection placeholder (no edit, no behavior fields
+    at all -- not something the proposer wrote) must still get the specific
+    "no matching candidate replacement" diagnosis, not a confusing "behavior
+    field missing" message from a placeholder that was never meant to carry
+    one."""
+    from shrlm.optimization.proposal import validate_batch_members
+
+    pattern = {
+        **PATTERN_TEXT,
+        "selectable": True,
+        "eligible_surfaces": ["S3", "S4"],
+        "admitted_refs": ["fixture-0"],
+    }
+    placeholder_item = {"pattern_index": 0, "surface": "S4"}
+    selection = {
+        "pattern_index": 0,
+        "surface": "S4",
+        "reason": "The cited operation lacks this check.",
+        "evidence_refs": ["fixture-0"],
+    }
+    accepted, rejected = validate_batch_members(
+        [placeholder_item], [pattern], H0, None, [], [selection]
+    )
+    assert not accepted and len(rejected) == 1
+    assert rejected[0]["reason"] == "selection has no matching candidate replacement"
+
+
 @pytest.mark.parametrize(
     "response",
     [
@@ -511,7 +599,10 @@ def test_orphan_selection_cannot_supply_a_replacement(tmp_path):
 
 
 def test_inventory_overflow_rejects_before_model_call(tmp_path):
-    pattern = {**PATTERN_TEXT, "signature": {**PATTERN_TEXT["signature"], "extra": "x" * 40000}}
+    from shrlm.optimization.proposal_evidence import EVIDENCE_BUDGET_CHARS
+
+    oversized = "x" * (EVIDENCE_BUDGET_CHARS + 10000)
+    pattern = {**PATTERN_TEXT, "signature": {**PATTERN_TEXT["signature"], "extra": oversized}}
     lm = MockLM(responses=[])
     with pytest.raises(ProposalRejection, match="inventory exceeds"):
         propose_round(
